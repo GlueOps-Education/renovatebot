@@ -1,41 +1,80 @@
-# # https://github.com/renovatebot/github-action?tab=readme-ov-file#example-with-github-app
-# name: Renovate
-# on:
-#   schedule:
-#     # The "*" (#42, asterisk) character has special semantics in YAML, so this
-#     # string has to be quoted.
-#     - cron: '0/15 * * * *'
-#   workflow_dispatch:
-# jobs:
-#   renovate:
-#     runs-on: ubuntu-latest
-#     steps:
-#       - name: Get token
-#         id: get_token
-#         uses: actions/create-github-app-token@df432ceedc7162793a195dd1713ff69aefc7379e # v2
-#         with: 
-#             # App being used: https://github.com/enterprises/glueops/settings/apps/public-glueops-renovatebot
-#             # App Permissions: https://docs.renovatebot.com/modules/platform/github/#running-as-a-github-app
-#           private-key: ${{ secrets.private_key }}
-#           app-id: ${{ secrets.app_id }}
-#           owner: ${{ github.repository_owner }}
+# https://github.com/renovatebot/github-action?tab=readme-ov-file#example-with-github-app
+name: Renovate
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
-#       - name: Checkout
-#         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+permissions:
+  contents: read
 
-#       - name: Self-hosted Renovate
-#         uses: renovatebot/github-action@a889a8abcb11ef7feaafaf5e483ea01d4bf7774e # v43.0.5
-#         with:
-#           token: '${{ steps.get_token.outputs.token }}'
-#           env-regex: "^(?:RENOVATE_\\w+|LOG_LEVEL|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|AWS_REGION)$"
-#         env:
-#           RENOVATE_PLATFORM: "github"
-#           RENOVATE_AUTODISCOVER: "true"
-#           RENOVATE_ALLOW_PLUGINS: "true"
-#           LOG_LEVEL: "DEBUG"
-#           RENOVATE_DRY_RUN: "null"  #set to "full" for dryrun and "null" to apply
-#           RENOVATE_AUTODISCOVER_FILTER: "['${{ github.repository_owner }}/*']" 
-#           RENOVATE_REQUIRE_CONFIG: "ignored"
-#           RENOVATE_FORCE: '{"force": {"schedule": ["at any time"]},"prConcurrentLimit": 0,"prHourlyLimit": 0,"extends": ["github>GlueOps/renovatebot-configs//defaults#v0.0.9"]}'
-#           RENOVATE_IGNORE_PR_AUTHOR: "true"
-          
+jobs:
+  get-repos:
+    runs-on: ubuntu-latest
+    outputs:
+      repo-list: ${{ steps.set-matrix.outputs.repo-list }}
+    steps:
+      - name: Install jq (if not preinstalled)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Get token
+        id: get_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          private-key: ${{ secrets.private_key }}
+          client-id: ${{ secrets.app_id }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Get Organizaiton repos via GitHub CLI
+        id: get_repos
+        env:
+          GH_TOKEN: ${{ steps.get_token.outputs.token }}
+        run: |
+          gh api installation/repositories --paginate \
+            --jq '.repositories[] | select(.archived==false) | .name' > repos.txt
+          jq -Rs 'split("\n") | map(select(length > 0))' repos.txt > repos.json
+
+      - name: Set matrix output
+        id: set-matrix
+        run: |
+          echo "repo-list=$(jq -c . repos.json)" >> "$GITHUB_OUTPUT"
+
+  renovatebot:
+    needs: get-repos
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: ${{ fromJson(needs.get-repos.outputs.repo-list) }}
+    concurrency:
+      group: renovatebot-${{ matrix.repo }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Get token
+        id: get_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with: 
+            # App being used is either PUBLIC or PRIVATE renovatebot: https://github.com/enterprises/glueops/settings/apps
+            # App Permissions: https://docs.renovatebot.com/modules/platform/github/#running-as-a-github-app
+          private-key: ${{ secrets.private_key }}
+          client-id: ${{ secrets.app_id }}
+          owner: ${{ github.repository_owner }}
+
+
+      - name: Self-hosted Renovate (no automerge)
+        uses: renovatebot/github-action@693b9ef15eec82123529a37c782242f091365961 # v46.1.14
+        with:
+          token: '${{ steps.get_token.outputs.token }}'
+          env-regex: "^(?:RENOVATE_\\w+|LOG_LEVEL|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|AWS_REGION)$"
+        env:
+          RENOVATE_PLATFORM: "github"
+          RENOVATE_AUTODISCOVER: "true"
+          RENOVATE_ALLOW_PLUGINS: "true"
+          LOG_LEVEL: "DEBUG"
+          RENOVATE_DRY_RUN: "null"  #set to "full" for dryrun and "null" to apply
+          RENOVATE_AUTODISCOVER_FILTER: "['${{ github.repository_owner }}/${{ matrix.repo }}']" 
+          RENOVATE_REQUIRE_CONFIG: "ignored"
+          RENOVATE_FORCE: '{"force": {"schedule": ["at any time"]},"prConcurrentLimit": 0,"prHourlyLimit": 0,"forkProcessing":"enabled","extends": ["github>GlueOps/renovatebot-configs//base#v0.0.33", "github>GlueOps/renovatebot-configs//defaults#v0.0.33"]}'
+          RENOVATE_IGNORE_PR_AUTHOR: "true"
